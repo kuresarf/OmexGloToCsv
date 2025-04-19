@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "OmexGloToCsv": {
+      "commandName": "Project",
+      "commandLineArgs": "..\\..\\..\\testdata\\2025-03-30-21-25-01.glo"
+    }
+  }
+}
