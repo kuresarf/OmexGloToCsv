@@ -1,9 +1,27 @@
 ﻿
+using System.Runtime.InteropServices.Marshalling;
 using System.Text;
 using System.Xml;
+using static OmexGloToCsv.Program;
 
 namespace OmexGloToCsv
 {
+
+    public class OmexLogRecord
+    {
+        public uint TimeInMillis { get; set; }
+        public uint MapAddress { get; set; }
+        public float LogValueReal { get; set; }
+        public uint LogValueRaw { get; set; }
+
+        public OmexLogRecord(uint timeInMillis)
+        {
+            this.TimeInMillis = timeInMillis;
+            MapAddress = 0;
+            LogValueReal = 0;
+            LogValueRaw = 0;
+        }
+    }
 
     // Interface for callbacks when processing log records
     public interface ILogRecordProcessor
@@ -11,20 +29,92 @@ namespace OmexGloToCsv
         // Callback method to be called when a log record is processed
         void ProcessLogEntry(uint timeInMillis, uint logValueInBits);
     }
-    
 
 
-    public class OmexGloLogChannel
+    // Define a concrete implementation of the ILogRecordProcessor interface
+    internal class LogRecordProcessor : ILogRecordProcessor
     {
-        private string outputName;
-        private int outputSize;
-        private float outputMin;
-        private float outputMax;
-        private float outputRange;
-        private float outputValuePerBit;
-        private int outputSigned;
-        private string outputUnits;
+        public Action<uint, uint> OnProcessLogRecord { get; set; }
 
+        public void ProcessLogEntry(uint timeInMillis, uint logValueInBits)
+        {
+            OnProcessLogRecord?.Invoke(timeInMillis, logValueInBits);
+        }
+    }
+
+
+    public class OmexLogChannel
+    {
+        internal string outputName;
+        internal int outputSize;
+        internal float outputMin;
+        internal float outputMax;
+        internal float outputRange;
+        internal float outputValuePerBit;
+        internal int outputSigned;
+        internal string outputUnits;
+
+        internal Dictionary<uint, OmexLogRecord> allLogRecords;
+
+        public const int TIMESTAMP_ALIGNMENT_MILLIS = 40;
+
+        public string OutputName { get => outputName; }
+        public int OutputSize { get => outputSize; }
+        public float OutputMin { get => outputMin; }
+        public float OutputMax { get => outputMax; }
+        public float OutputRange { get => outputRange; }
+        public float OutputValuePerBit { get => outputValuePerBit; }
+        public int OutputSigned { get => outputSigned; }
+        public string OutputUnits { get => outputUnits; }
+
+
+        public Dictionary<uint, OmexLogRecord> LogRecords
+        {
+            get { return allLogRecords; }
+        }
+
+        public OmexLogChannel()
+        {
+            outputName = "";
+            outputSize = 0;
+            outputMin = 0;
+            outputMax = 0;
+            outputRange = 0;
+            outputValuePerBit = 0;
+            outputSigned = 0;
+            outputUnits = "";
+
+            allLogRecords = new Dictionary<uint, OmexLogRecord>();
+        }
+
+        public void AddLogRecord(uint timeInMillis, uint rawValue)
+        {
+            OmexLogRecord logRecord = new OmexLogRecord(timeInMillis);
+            logRecord.LogValueRaw = rawValue;
+            logRecord.LogValueReal = ConvertRawValueToRealValueAsFloat(rawValue);
+
+            // Used TryAdd to handle duplicate timeInMillis values - assuming that if the time key is the same the data will be the same
+            allLogRecords.TryAdd(logRecord.TimeInMillis, logRecord);
+        }
+
+        internal string ConvertRawValueToRealValueAsString(uint logValueUint16)
+        {
+            float realValue = ConvertRawValueToRealValueAsFloat(logValueUint16);
+            return realValue.ToString();
+        }
+
+        internal float ConvertRawValueToRealValueAsFloat(uint logValueUint16)
+        {
+            float realValue = logValueUint16 * OutputValuePerBit;
+            // Round the real value to 3 decimal places
+            realValue = (float)Math.Round(realValue, 3);
+            return realValue;
+        }
+    }
+
+
+    public class OmexGloLogChannelReader
+    {
         private Boolean isXmlFormatLoaded = false;
         private OmexGloSubFileDescriptor channelFormatSubFile;
         private OmexGloSubFileDescriptor channelLogDataSubFile;
@@ -32,12 +122,16 @@ namespace OmexGloToCsv
 
         private ILogger logger;
 
+        private OmexLogChannel theLogChannel;
 
-        public OmexGloLogChannel(OmexGloSubFileDescriptor channelFormatSubFile, OmexGloSubFileDescriptor channelLogDataSubFile, ILogger logger)
+
+        public OmexGloLogChannelReader(OmexGloSubFileDescriptor channelFormatSubFile, OmexGloSubFileDescriptor channelLogDataSubFile, ILogger logger)
         {
             this.channelFormatSubFile = channelFormatSubFile;
             this.channelLogDataSubFile = channelLogDataSubFile;
             this.logger = logger;
+
+            theLogChannel = null;
         }
 
         public OmexGloSubFileDescriptor LogDataSubFile
@@ -52,14 +146,10 @@ namespace OmexGloToCsv
             set { channelFormatSubFile = value; }
         }
 
-        public string OutputName { get => outputName; }
-        internal int OutputSize { get => outputSize; }
-        internal float OutputMin { get => outputMin; }
-        internal float OutputMax { get => outputMax; }
-        internal float OutputRange { get => outputRange; }
-        internal float OutputValuePerBit { get => outputValuePerBit; }
-        internal int OutputSigned { get => outputSigned; }
-        internal string OutputUnits { get => outputUnits; }
+        public OmexLogChannel LogChannel
+        {
+            get { return theLogChannel; }            
+        }
 
         private void doLog(LogLevel level, string logString)
         {
@@ -112,7 +202,11 @@ namespace OmexGloToCsv
                     xmlStr = xmlStr.Replace("\t", ""); // remove tabs
                     xmlStr = xmlStr.Replace("  ", ""); // remove double spaces
 
-                    //Log("    Channel Format XML: " + xmlStr);
+                    // remove weird escape sequences used for unit names
+                    xmlStr = xmlStr.Replace("&micro;", "micro");  //for micro seconds
+                    xmlStr = xmlStr.Replace("&deg;", "degrees");  //for degrees spark advance
+
+                    doLog(LogLevel.Debug, "    Channel Format XML: " + xmlStr);
                 }
                 else
                 {
@@ -138,68 +232,63 @@ namespace OmexGloToCsv
                 doLog(LogLevel.Error, "Error: No channel output node found in XML");
                 return;
             }
+
+            // Create a new log channel object to store the meta data for the channel
+            theLogChannel = new OmexLogChannel();
+
             // Get the channel name
             string channelOutputProperty = channelOutputNode.Attributes["name"].Value;
             doLog(LogLevel.Info, "    Channel Name: " + channelOutputProperty);
-            this.outputName = channelOutputProperty;
+            theLogChannel.outputName = channelOutputProperty;
 
             // Get the channel size
             channelOutputProperty = channelOutputNode.Attributes["size"].Value;
             doLog(LogLevel.Debug, "    Channel Size: " + channelOutputProperty);
-            this.outputSize = int.Parse(channelOutputProperty);
+            theLogChannel.outputSize = int.Parse(channelOutputProperty);
 
             // Get the channel min
             channelOutputProperty = channelOutputNode.Attributes["min"].Value;
             doLog(LogLevel.Debug, "    Channel Min: " + channelOutputProperty);
-            this.outputMin = float.Parse(channelOutputProperty);
+            theLogChannel.outputMin = float.Parse(channelOutputProperty);
 
             // Get the channel max
             channelOutputProperty = channelOutputNode.Attributes["max"].Value;
             doLog(LogLevel.Debug, "    Channel Max: " + channelOutputProperty);
-            this.outputMax = float.Parse(channelOutputProperty);
+            theLogChannel.outputMax = float.Parse(channelOutputProperty);
 
-            this.outputRange = OutputMax - OutputMin;
+            theLogChannel.outputRange = theLogChannel.outputMax - theLogChannel.outputMin;
 
             // Get the channel signed
             channelOutputProperty = channelOutputNode.Attributes["signed"].Value;
             doLog(LogLevel.Debug, "    Channel Signed: " + channelOutputProperty);
-            this.outputSigned = int.Parse(channelOutputProperty);
+            theLogChannel.outputSigned = int.Parse(channelOutputProperty);
 
             // Get the channel units
             channelOutputProperty = channelOutputNode.Attributes["units"].Value;
             doLog(LogLevel.Debug, "    Channel Units: " + channelOutputProperty);
-            this.outputUnits = channelOutputProperty;
+            theLogChannel.outputUnits = channelOutputProperty;
 
             // select the scalar node in the xml document
             XmlNode channelScalarNode = channelXmlDoc.SelectSingleNode("/channel/output/scalar");
             if (channelScalarNode == null)
             {
                 doLog(LogLevel.Warning, "    Warning: No channel output scalar node found in XML, defaulting ValuePerBit to 1");
-                this.outputValuePerBit = 1;  // Default to 1 if not found
+                theLogChannel.outputValuePerBit = 1;  // Default to 1 if not found
                 return;
             }
 
             // Get the value-per-bit for the channel used to calculate the real value from the 8 or 16 bit raw value
             channelOutputProperty = channelScalarNode.Attributes["m_adjusted"].Value;
             doLog(LogLevel.Debug, "    Channel Real Value Per Bit: " + channelOutputProperty);
-            this.outputValuePerBit = float.Parse(channelOutputProperty);
+            theLogChannel.outputValuePerBit = float.Parse(channelOutputProperty);
 
             isXmlFormatLoaded = true;
         }
 
-        internal string ConvertRawValueToRealValue(uint logValueUint16)
-        {
-            float realValue = logValueUint16 * OutputValuePerBit;
-            // Round the real value to 3 decimal places
-            realValue = (float)Math.Round(realValue, 3);
-            return realValue.ToString();
-        }
-
-
-        public void LoadAllDataBlocks(BinaryReader reader)
+        public void LoadRawDataBlocks(BinaryReader reader)
         {
             // If we've not loaded the channel format XML yet, do it now
-            if (!isXmlFormatLoaded)
+            if ((!isXmlFormatLoaded) || (theLogChannel == null))
             {
                 ReadChannelFormatXml(reader);
             }
@@ -212,7 +301,7 @@ namespace OmexGloToCsv
             foreach (uint dataBlockAddress in channelLogDataSubFile.DataBlockAddresses)
             {
                 // read a single data block
-                byte[] singleBlockBytes = ReadFullDataBlock(reader, dataBlockAddress);
+                byte[] singleBlockBytes = ReadSingleDataBlock(reader, dataBlockAddress);
 
                 // skip the first 8 bytes of each block (header) and append the rest to the dataBlockBytes buffer
                 Array.Copy(singleBlockBytes, 8, allLogDataBytes, index, singleBlockBytes.Length - 8);
@@ -221,7 +310,7 @@ namespace OmexGloToCsv
 
         }
 
-        private byte[] ReadFullDataBlock(BinaryReader reader, uint dataBlockOffset)
+        private byte[] ReadSingleDataBlock(BinaryReader reader, uint dataBlockOffset)
         {
             // Seek to the start of the subfile's first data chunk and read the full block (typically 4Kb)
             reader.BaseStream.Seek(dataBlockOffset, SeekOrigin.Begin);
@@ -235,7 +324,52 @@ namespace OmexGloToCsv
             return dataBlockBytes;
         }
 
-        public void ProcessLogData(ILogRecordProcessor logRecordProcessor)
+        public OmexLogChannel LoadLogChannel(Boolean alignTimeStamps)
+        {
+            // Check if the log data has been loaded
+            if ((allLogDataBytes == null) || (theLogChannel == null))
+            {
+                doLog(LogLevel.Error, "Error: Log data not loaded, ensure you call LoadAllDataBlocks first");
+                throw new ArgumentException("Log data not loaded yet");
+            }                                   
+
+            // Handle the timeInMillis value overflowing every 65535 milliseconds (65.535 seconds)
+            uint previousHighestTime = 0;
+            uint timeOffset = 0;
+
+            // Get all the time and data records out the data block and add into the log record list for easier access
+            var logRecordProcessor = new LogRecordProcessor
+            {
+                OnProcessLogRecord = (timeInMillis, logValueInBits) =>
+                {
+                    if (timeInMillis < previousHighestTime)
+                    {
+                        // Time has overflowed, so add 65536 (2 byte max val) to the time offset value
+                        timeOffset = timeOffset + 65536;  
+                    }
+                    
+                    uint theTimeStamp = (timeOffset + timeInMillis);
+                    if (alignTimeStamps)
+                    {
+                        // Round down the time to the nearest TIMESTAMP_ALIGNMENT_MILLIS (30ms) interval, to make it easier to align with other channels
+                        theTimeStamp = (uint)(theTimeStamp - (theTimeStamp % OmexLogChannel.TIMESTAMP_ALIGNMENT_MILLIS));                        
+                    }            
+
+                    // Create a record to hold the data values 
+                    theLogChannel.AddLogRecord(theTimeStamp, logValueInBits);
+
+                    previousHighestTime = timeInMillis;  // remember the latest time value to check if we rolled over
+                }
+            };
+
+            ProcessLogDataWithCallback(logRecordProcessor);
+
+            return theLogChannel;
+        }
+
+
+
+        public void ProcessLogDataWithCallback(ILogRecordProcessor logRecordProcessor)
         {
             // Check if the channel format XML has been loaded
             if (!isXmlFormatLoaded)
@@ -245,9 +379,9 @@ namespace OmexGloToCsv
             }
 
             // Check if the log data has been loaded
-            if (allLogDataBytes == null)
+            if ((allLogDataBytes == null) || (theLogChannel == null))
             {
-                doLog(LogLevel.Error, "Error: Log data not loaded, ensure you call LoadAllChannelDataBlocksIntoSingleBuffer first");
+                doLog(LogLevel.Error, "Error: Log data not loaded, ensure you call LoadAllDataBlocks first");
                 return;
             }
 
@@ -258,7 +392,7 @@ namespace OmexGloToCsv
             // Read until we get nulls, indicating end of data
             // Then we scale the byte value using the min/max range from the channel format xml to get the real value
 
-
+            int recordSizeInBytes = theLogChannel.OutputSize;
             int recordCount = 0;
             uint index = 0;
             byte[] timingBytes = new byte[2];
@@ -277,14 +411,14 @@ namespace OmexGloToCsv
                 index += 2;
 
                 // Use the channel format XML OuputSize to determine how many bytes to read for each data value
-                byte[] dataBytes = new byte[this.OutputSize];
-                Array.Copy(allLogDataBytes, index, dataBytes, 0, this.OutputSize);
-                index += (uint)this.OutputSize;
+                byte[] dataBytes = new byte[recordSizeInBytes];
+                Array.Copy(allLogDataBytes, index, dataBytes, 0, recordSizeInBytes);
+                index += (uint)recordSizeInBytes;
 
                 recordCount++;
 
                 // Convert the data bytes to an integer value based on the channel format XML's 'size' attribute, then scale that to a real value
-                switch (this.OutputSize)
+                switch (recordSizeInBytes)
                 {
                     case 1:
                         byte logRawValueByte = dataBytes[0];
@@ -304,7 +438,7 @@ namespace OmexGloToCsv
 
             }
 
-            doLog(LogLevel.Info, $"  Processed {recordCount} records in {this.OutputName}");
+            doLog(LogLevel.Info, $"  Processed {recordCount} records in {theLogChannel.OutputName}");
 
         }
     }

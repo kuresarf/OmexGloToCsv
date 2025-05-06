@@ -2,7 +2,7 @@
   "profiles": {
     "OmexGloToCsv": {
       "commandName": "Project",
-      "commandLineArgs": "..\\..\\..\\testdata\\2025-03-30-21-25-01.glo"
+      "commandLineArgs": "-M -DEBUG -input \"..\\..\\..\\testdata\\2024-05-19-18-33-49.glo\" "
     }
   }
 }

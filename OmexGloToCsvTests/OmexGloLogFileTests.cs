@@ -28,7 +28,7 @@
                     const int EXPECTED_CHANNEL_COUNT = 5;
 
                     Assert.IsTrue(logFile.SubFiles.Count == EXPECTED_SUBFILE_COUNT, "Wrong number of subfiles found in the .glo file");
-                    Assert.IsTrue(logFile.LogChannels.Count == EXPECTED_CHANNEL_COUNT, "Wrong number of channels found in the .glo file");
+                    Assert.IsTrue(logFile.LogChannelParsers.Count == EXPECTED_CHANNEL_COUNT, "Wrong number of channels found in the .glo file");
 
                 }
             }
@@ -54,17 +54,17 @@
                     // Create the OmexGloLogFile, which will read the file and identify the log channels
                     OmexGloLogFile logFile = new OmexGloLogFile(reader, new SimpleLogger(LogLevel.Debug));
 
-                    foreach (OmexGloLogChannel logChannel in logFile.LogChannels)
+                    foreach (OmexGloLogChannelReader logChannel in logFile.LogChannelParsers)
                     {
                         logChannel.ReadChannelFormatXml(reader);
                     }
 
                     // Check the channel properties
-                    Assert.IsTrue(logFile.LogChannels[0].OutputName == "Engine Load", "Wrong channel name");
-                    Assert.IsTrue(logFile.LogChannels[1].OutputName == "Oxygen raw1", "Wrong channel name");
-                    Assert.IsTrue(logFile.LogChannels[2].OutputName == "Throttle", "Wrong channel name");
-                    Assert.IsTrue(logFile.LogChannels[3].OutputName == "Engine Speed", "Wrong channel name");
-                    Assert.IsTrue(logFile.LogChannels[4].OutputName == "Lambda1", "Wrong channel name");
+                    Assert.IsTrue(logFile.LogChannelParsers[0].LogChannel.OutputName == "Engine Load", "Wrong channel name");
+                    Assert.IsTrue(logFile.LogChannelParsers[1].LogChannel.OutputName == "Oxygen raw1", "Wrong channel name");
+                    Assert.IsTrue(logFile.LogChannelParsers[2].LogChannel.OutputName == "Throttle", "Wrong channel name");
+                    Assert.IsTrue(logFile.LogChannelParsers[3].LogChannel.OutputName == "Engine Speed", "Wrong channel name");
+                    Assert.IsTrue(logFile.LogChannelParsers[4].LogChannel.OutputName == "Lambda1", "Wrong channel name");
                 }
             }
             catch (Exception ex)
@@ -92,13 +92,13 @@
 
                     const int THROTTLE_CHANNEL_INDEX = 2;
 
-                    OmexGloLogChannel logChannel = logFile.LogChannels[THROTTLE_CHANNEL_INDEX];
+                    OmexGloLogChannelReader logChannel = logFile.LogChannelParsers[THROTTLE_CHANNEL_INDEX];
                     logChannel.ReadChannelFormatXml(reader);
                     
                     // Check the channel properties
-                    Assert.IsTrue(logChannel.OutputName == "Throttle", "Wrong channel name");
+                    Assert.IsTrue(logChannel.LogChannel.OutputName == "Throttle", "Wrong channel name");
 
-                    logChannel.LoadAllDataBlocks(reader);
+                    logChannel.LoadRawDataBlocks(reader);
 
                     int recordCount = 0;
                     var logRecordProcessorForTest = new LogRecordProcessorForTest
@@ -109,7 +109,7 @@
                         }
                     };
 
-                    logChannel.ProcessLogData(logRecordProcessorForTest);
+                    logChannel.ProcessLogDataWithCallback(logRecordProcessorForTest);
 
                     Assert.IsTrue(recordCount == 2248, "Wrong number of records for Throttle channel");
 

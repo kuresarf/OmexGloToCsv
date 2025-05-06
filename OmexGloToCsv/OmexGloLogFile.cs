@@ -7,8 +7,9 @@ namespace OmexGloToCsv
     {
         private BinaryReader reader;        
         private List<OmexGloSubFileDescriptor> subFiles = null;
-        private List<OmexGloLogChannel> logChannels = null;
+        private List<OmexGloLogChannelReader> logChannelParsers = null;
         private ILogger logger;
+        private string logNotes = "";
 
         public OmexGloLogFile(BinaryReader reader, ILogger logger)
         {
@@ -23,11 +24,16 @@ namespace OmexGloToCsv
             get { return subFiles; }            
         }
 
-        public List<OmexGloLogChannel> LogChannels
+        public List<OmexGloLogChannelReader> LogChannelParsers
         {
-            get { return logChannels; }
+            get { return logChannelParsers; }
         }
-       
+
+        public string LogNotes
+        {
+            get { return logNotes; }
+        }
+
         private void doLog(LogLevel level, string logString)
         {
             if (logger != null)
@@ -74,7 +80,7 @@ namespace OmexGloToCsv
 
         private void IdentifyLogChannels(BinaryReader reader)
         {
-            logChannels = new List<OmexGloLogChannel>();
+            logChannelParsers = new List<OmexGloLogChannelReader>();
 
             foreach (var subFile in subFiles)
             {
@@ -90,6 +96,12 @@ namespace OmexGloToCsv
                 {
                     // read notes
                     doLog(LogLevel.Debug, $"  Found notes");
+                    logNotes = ReadNotes(reader, subFile);
+                }
+                else if (subFile.SubFileName.Equals("markers.glm", StringComparison.CurrentCultureIgnoreCase))
+                {
+                    // read markers
+                    doLog(LogLevel.Debug, $"  Found markers");
                 }
                 else if (subFile.SubFileName.EndsWith(".gcf", StringComparison.CurrentCultureIgnoreCase))
                 {
@@ -106,8 +118,8 @@ namespace OmexGloToCsv
                         {
                             doLog(LogLevel.Debug, $"  Found log channel and log data subfile: {subFiles[i].SubFileName}");
 
-                            OmexGloLogChannel logChannel = new OmexGloLogChannel(subFile, subFiles[i], logger);
-                            logChannels.Add(logChannel);
+                            OmexGloLogChannelReader logChannel = new OmexGloLogChannelReader(subFile, subFiles[i], logger);
+                            logChannelParsers.Add(logChannel);
                             found = true;
 
                             break;
@@ -134,6 +146,41 @@ namespace OmexGloToCsv
                 }
             }
         }
+
+
+        private String ReadNotes(BinaryReader reader, OmexGloSubFileDescriptor notesSubfile)
+        {
+            string notesString = "";
+
+            // Seek to the start of the subfile's first data chunk, plus 8 bytes to skip the 2 DWORD header
+            reader.BaseStream.Seek(notesSubfile.DataBlockAddresses[0] + 8, SeekOrigin.Begin);            
+
+            // Read DWORD containing length of the XML string in widechars (i.e. 2 * length in bytes)
+            byte[] dwordBytes = reader.ReadBytes(4);
+            uint xmlLength = BitConverter.ToUInt32(dwordBytes, 0) * 2;
+
+            // Read the Notes string
+            byte[] notesBytes = reader.ReadBytes((int)xmlLength);
+            if (notesBytes.Length == xmlLength)
+            {
+                notesString = Encoding.Default.GetString(notesBytes);
+                // convert widechar string to normal string
+                notesString = notesString.Replace("\0", ""); // remove null characters
+                notesString = notesString.Replace("\r", ""); // remove carriage returns
+                notesString = notesString.Replace("\n", ""); // remove new lines
+                notesString = notesString.Replace("\t", ""); // remove tabs
+                notesString = notesString.Replace("  ", ""); // remove double spaces
+
+                doLog(LogLevel.Debug, "    Notes: " + notesString);
+            }
+            else
+            {
+                doLog(LogLevel.Error, "    Error: invalid notes string length");
+            }
+
+            return notesString;
+        }
+
 
         private void IdentifySubFiles(BinaryReader reader)
         {

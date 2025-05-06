@@ -1,24 +1,80 @@
-﻿using System.Text;
+﻿using System.Collections.Generic;
+using System.Net.NetworkInformation;
+using System.Text;
+using static OmexGloToCsv.Program;
 
 namespace OmexGloToCsv
 {
     internal class Program
-    {
+    {        
+
         static void Main(string[] args)
         {
 
-            if (args.Length < 1)
+            if (args.Length < 2)
             {
-                Log("Usage: OmexGloToCsv \"C:\\Users\\john\\Documents\\OMEX\\MAP4000\\Logs\\MyLog1.glo\"");
-                Log("Reads an Omex Map4000 .glo log file, extracts each ECU log channel and saves it to a .csv file named using the input filename and the channel name e.g. MyLog1-Throttle.csv");
+                Console.WriteLine("Usage: OmexGloToCsv <Command> [-DEBUG] -input <.glo filename>");               
+                Console.WriteLine("  Where <Command> is one of: ");
+                Console.WriteLine("    -I Outputs each channel in individual CSV files with original timestamps e.g. MyLog1-Throttle.csv");
+                Console.WriteLine("    -A Output all channels in a single CSV file with timestamps aligned to 30ms intervals e.g. MyLog1-All.csv ");
+                Console.WriteLine("    -M Generate an AFR map.  glo log file must contain Engine Speed, Engine Load and Lambda channels.");
+                Console.WriteLine("    -MM Generate an AFR map with max/min/avg.  glo log file must contain Engine Speed, Engine Load and Lambda channels.");
+                Console.WriteLine(" ");
+                Console.WriteLine("Optional Parameters: ");
+                Console.WriteLine("  -DEBUG causes a lot of extra logging to be output to the console.  If there are problems the -I command is most likely to work");
+                Console.WriteLine(" ");
+                Console.WriteLine("Example: OmexGloToCsv -I -input \"C:\\Users\\kuresarf\\Documents\\OMEX\\MAP4000\\Logs\\MyLog1.glo\"");
+                Console.WriteLine("  OmexGloToCsv reads an Omex MAP4000 .glo log file, extracts log data and saves each channel to a .csv file");
+
                 return;
             }
 
-            string filePath = args[0];
+            string command = args[0];
+            if (command != "-I" && command != "-A" && command != "-M" && command != "-MM")
+            {
+                Console.WriteLine("Error: Invalid command. Run OmexGloToCsv with no parameters to display usage instructions.");
+                return;
+            }
 
+            // Define mandatory and optional parameters
+            List<string> mandatoryParams = new List<string> { "-input" };
+            Dictionary<string, string> parsedParams = new Dictionary<string, string>();
+
+            // Process arguments, adding them into the parsedParams dictionary for use later
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (mandatoryParams.Contains(args[i]) || args[i].StartsWith("-"))
+                {
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith("-"))                 
+                    {
+                        // if it is a parameter with a value (e.g. -input "C:\\MyLog.glo") add the value 
+                        parsedParams[args[i]] = args[i + 1];
+                        i++;
+                    }
+                    else
+                    {
+                        parsedParams[args[i]] = "true"; // Flag-style switch
+                    }
+                }
+            }
+
+            // Validate mandatory parameters were passed in
+            foreach (var param in mandatoryParams)
+            {
+                if (!parsedParams.ContainsKey(param))
+                {
+                    Console.WriteLine($"Error: Missing mandatory parameter {param}");
+                    return;
+                }
+            }
+
+            // Check the input parameter points to a valid file
+            string filePath = parsedParams.GetValueOrDefault("-input", "");
             if (!File.Exists(filePath))
             {
-                Log($"Error: File '{filePath}' not found.");
+                Log($"Error: File '{filePath}' not found, check the -input parameter.");
+                Log($"Full path is '{Path.GetFullPath(filePath)}'");
+                
                 return;
             }
 
@@ -30,13 +86,42 @@ namespace OmexGloToCsv
                     Log("  ");
                     Log("Processing " + filePath);
 
+                    // Determine the log level based on the -DEBUG parameter
+                    SimpleLogger logger;
+                    if (parsedParams.GetValueOrDefault("-DEBUG", "false") == "true")
+                        logger = new SimpleLogger(LogLevel.Debug);
+                    else
+                        logger = new SimpleLogger(LogLevel.Info);
+
                     // Create the OmexGloLogFile, which will read the file and identify the log channels
-                    OmexGloLogFile logFile = new OmexGloLogFile(reader, new SimpleLogger(LogLevel.Info));
+                    OmexGloLogFile logFile = new OmexGloLogFile(reader, logger);
 
                     Log($"Found {logFile.SubFiles.Count} subfiles");
-                    Log($"Found {logFile.LogChannels.Count} log channels");
+                    Log($"Found {logFile.LogChannelParsers.Count} log channels");
 
-                    SaveEachLogChannelToCsvFile(filePath, reader, logFile);
+                    if (command == "-I")
+                    {
+                        Log("Saving each log channel to individual CSV files");
+                        SaveEachLogChannelToCsvFile(filePath, reader, logFile);
+                    }
+                    else if (command == "-A")
+                    {
+                        Log("Saving all log channels to a single CSV file");
+                        SaveAllLogChannelsToSingleCsvFile(filePath, reader, logFile);
+
+                    }
+                    else if (command == "-M")
+                    {
+                        Log("Creating AFR map");
+                        SaveAfrMap(filePath, reader, logFile, logger, false);
+
+                    }
+                    else if (command == "-MM")
+                    {
+                        Log("Creating AFR map with max/min/avg");
+                        SaveAfrMap(filePath, reader, logFile, logger, true);
+
+                    }
                 }
             }
             catch (Exception ex)
@@ -47,41 +132,166 @@ namespace OmexGloToCsv
             Log("Done!");
         }
 
+
+
+        private static void SaveAfrMap(string filePath, BinaryReader reader, OmexGloLogFile logFile,SimpleLogger logger, Boolean includeMaxMin)
+        {                                 
+            
+            OmexGloLogChannelReader engineLoadLogChannelReader = null;
+            OmexGloLogChannelReader engineSpeedLogChannelReader = null;
+            OmexGloLogChannelReader lambdaLogChannelReader = null;
+
+            foreach (OmexGloLogChannelReader logChannelReader in logFile.LogChannelParsers)
+            {
+                // Load the channel descriptor and data blocks ready for processing
+                logChannelReader.ReadChannelFormatXml(reader);
+
+                // Keep a reference to the engine load and engine speed channels to let us calculate the fuel map addresses
+                if (logChannelReader.LogChannel.OutputName == "Engine Load")
+                {
+                    engineLoadLogChannelReader = logChannelReader;
+                }
+                else if (logChannelReader.LogChannel.OutputName == "Engine Speed")
+                {
+                    engineSpeedLogChannelReader = logChannelReader;
+                }
+                else if (logChannelReader.LogChannel.OutputName == "Lambda1")
+                {
+                    lambdaLogChannelReader = logChannelReader; 
+                }
+            }
+
+            if (engineLoadLogChannelReader == null || engineSpeedLogChannelReader == null || lambdaLogChannelReader == null)
+            {
+                Log("Error: Missing required channels for AFR map generation.  Log must include Engine Load, Engine Speed and Lambda");
+                return;
+            }
+
+            OmexMapGrid afrMap = new OmexMapGrid( engineLoadLogChannelReader, engineSpeedLogChannelReader, lambdaLogChannelReader, logger);
+
+            afrMap.LoadMapData(reader);
+            StringBuilder csvStr = afrMap.GetMapCsvString(filePath + " - " + logFile.LogNotes, includeMaxMin);
+            SaveStringBuilderToFile(csvStr, Path.GetFileNameWithoutExtension(filePath) + "-AFR Map.csv");
+        }
+
+
+        private static void SaveAllLogChannelsToSingleCsvFile(string filePath, BinaryReader reader, OmexGloLogFile logFile)
+        {
+            List<StringBuilder> csvStrings = new List<StringBuilder>();
+            HashSet<uint> uniqueTimestamps = new HashSet<uint>();
+
+            // Build the CSV header string from all the channel names / units
+            StringBuilder csvHeaderStr = new StringBuilder("\"Time (ms)\"");
+            foreach (OmexGloLogChannelReader logChannelParser in logFile.LogChannelParsers)
+            {
+                // Load the channel descriptor and data blocks ready for processing
+                logChannelParser.LoadRawDataBlocks(reader);
+                OmexLogChannel tempLogChannel = logChannelParser.LoadLogChannel(true);  // alignTimestamps = true, may lose some records, but aligns data on common time axis
+
+                csvHeaderStr.Append(",\"" + logChannelParser.LogChannel.OutputName + " (" + logChannelParser.LogChannel.OutputUnits + ")\"");
+
+                // Loop through the log records and add the time to the list of unique timestamps
+                foreach (OmexLogRecord logRecord in tempLogChannel.LogRecords.Values)
+                {
+                    // Add the time to the list of unique timestamps
+                    uniqueTimestamps.Add(logRecord.TimeInMillis);
+                }
+            }
+
+            // Store the CSV header
+            csvStrings.Add(csvHeaderStr);
+
+            // Sort the timestamps so we keep the data in the right order
+            SortedSet<uint> sortedTimestamps = new SortedSet<uint>(uniqueTimestamps);
+
+            // Use the unique time stamps as a common time axis for all channels and add each channel's data 
+            foreach (uint timeStampInMillis in sortedTimestamps)
+            {
+                StringBuilder sb = new StringBuilder(timeStampInMillis.ToString());
+                csvStrings.Add(sb);
+
+                // Loop round and add the log data value from every channel to the CSV
+                foreach (OmexGloLogChannelReader logChannelParser in logFile.LogChannelParsers)
+                {
+                    OmexLogChannel logChannel = logChannelParser.LogChannel;
+
+                    if (logChannel.LogRecords.ContainsKey(timeStampInMillis))
+                    {
+                        OmexLogRecord logRecord = logChannel.LogRecords[timeStampInMillis];
+                        sb.Append("," + logRecord.LogValueReal.ToString());
+                    }
+                    else
+                    {
+                        // If the log channel doesn't have a record for this time, add a blank value
+                        sb.Append(",");
+                    }
+
+                }
+            }
+
+            SaveStringListToFile(csvStrings, Path.GetFileNameWithoutExtension(filePath) + "-All.csv");
+        }
+
         private static void SaveEachLogChannelToCsvFile(string filePath, BinaryReader reader, OmexGloLogFile logFile)
         {
-            foreach (OmexGloLogChannel logChannel in logFile.LogChannels)
+            foreach (OmexGloLogChannelReader logChannelParser in logFile.LogChannelParsers)
             {
                 // Read each log channel data and save it to a CSV file
-                Log($"  Reading log data from {logChannel.ChannelFormatSubFile.SubFileName} ");
-                StringBuilder csvStr = ReadSingleLogChannelIntoCsvString(reader, logChannel);
-                SaveCsvDataToFile(csvStr, Path.GetFileNameWithoutExtension(filePath) + "-" + logChannel.OutputName + ".csv");
+                Log($"  Reading log data from {logChannelParser.ChannelFormatSubFile.SubFileName} ");
+                StringBuilder csvStr = ReadSingleLogChannelIntoCsvString(reader, logChannelParser);
+                SaveStringBuilderToFile(csvStr, Path.GetFileNameWithoutExtension(filePath) + "-" + logChannelParser.LogChannel.OutputName + ".csv");
 
             }
         }
 
         // Update the code to use the concrete implementation
-        private static StringBuilder ReadSingleLogChannelIntoCsvString(BinaryReader reader, OmexGloLogChannel logChannel)
+        private static StringBuilder ReadSingleLogChannelIntoCsvString(BinaryReader reader, OmexGloLogChannelReader logChannelReader)
         {
-            logChannel.LoadAllDataBlocks(reader);
-
+            logChannelReader.LoadRawDataBlocks(reader);
+            OmexLogChannel logChannel = logChannelReader.LoadLogChannel(false);
+            
             StringBuilder csvStr = new StringBuilder("\"Time (ms)\",\"" + logChannel.OutputName + " (" + logChannel.OutputUnits + ")\"" + Environment.NewLine);
 
-            // Create a new LogRecordProcessor callback to process each log entry, adding the time and data value to a CSV string
-            var logRecordProcessor = new LogRecordProcessor
+            // process each log record, adding the time and data value to a CSV string
+            foreach (OmexLogRecord logRecord in logChannel.LogRecords.Values)
             {
-                OnProcessLogRecord = (timeInMillis, logValueInBits) =>
-                {
-                    csvStr.Append(timeInMillis.ToString() + "," + logChannel.ConvertRawValueToRealValue(logValueInBits) + Environment.NewLine);
-                }
-            };
-
-            logChannel.ProcessLogData(logRecordProcessor);
+                csvStr.Append(logRecord.TimeInMillis.ToString() + "," + logRecord.LogValueReal.ToString() + Environment.NewLine);
+            }
 
             return csvStr;
         }
 
 
-        private static void SaveCsvDataToFile(StringBuilder csvStr, string csvFileName)
+
+        private static void SaveStringListToFile(List<StringBuilder> csvStrings, string csvFileName)
+        {
+            // Remove invalid characters from the file name
+            foreach (char c in Path.GetInvalidFileNameChars())
+            {
+                csvFileName = csvFileName.Replace(c, '_');
+            }
+
+            try
+            {
+                using (StreamWriter writer = new StreamWriter(csvFileName))
+                {
+                    foreach (var csvStr in csvStrings)
+                    {
+                        writer.WriteLine(csvStr.ToString());
+                    }                    
+                }
+
+                csvFileName = Path.GetFullPath(csvFileName);
+                Log($"  Saved CSV file to {csvFileName}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Error saving csv file: {ex.Message}");
+            }
+        }
+
+
+        private static void SaveStringBuilderToFile(StringBuilder csvStr, string csvFileName)
         {
             // Remove invalid characters from the file name
             foreach (char c in Path.GetInvalidFileNameChars())
@@ -97,7 +307,7 @@ namespace OmexGloToCsv
                 }
 
                 csvFileName = Path.GetFullPath(csvFileName);
-                Log($"  Saved channel data to {csvFileName}");
+                Log($"  Saved data to {csvFileName}");
             }
             catch (Exception ex)
             {
@@ -106,16 +316,7 @@ namespace OmexGloToCsv
         }
 
 
-        // Define a concrete implementation of the ILogRecordProcessor interface
-        internal class LogRecordProcessor : ILogRecordProcessor
-        {
-            public Action<uint, uint> OnProcessLogRecord { get; set; }
 
-            public void ProcessLogEntry(uint timeInMillis, uint logValueInBits)
-            {
-                OnProcessLogRecord?.Invoke(timeInMillis, logValueInBits);
-            }
-        }
 
 
         private static void Log(string logString)
